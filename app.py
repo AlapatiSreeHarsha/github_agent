@@ -6,14 +6,17 @@ import requests
 import json
 from git import Repo
 import base64
+import shutil
+from pathlib import Path
+import atexit
 
 st.set_page_config(page_title="Git Repository Manager", layout="wide")
 
 # Initialize session state variables
 if 'repo_url' not in st.session_state:
     st.session_state.repo_url = ""
-if 'local_path' not in st.session_state:
-    st.session_state.local_path = ""
+if 'temp_dir' not in st.session_state:
+    st.session_state.temp_dir = ""
 if 'branches' not in st.session_state:
     st.session_state.branches = []
 if 'selected_branch' not in st.session_state:
@@ -32,6 +35,19 @@ if 'git_username' not in st.session_state:
     st.session_state.git_username = ""
 if 'git_email' not in st.session_state:
     st.session_state.git_email = ""
+if 'uploaded_files' not in st.session_state:
+    st.session_state.uploaded_files = []
+
+# Cleanup function to remove temporary directory
+def cleanup():
+    if st.session_state.temp_dir and os.path.exists(st.session_state.temp_dir):
+        try:
+            shutil.rmtree(st.session_state.temp_dir)
+        except:
+            pass
+
+# Register cleanup function to run when Python exits
+atexit.register(cleanup)
 
 # Function to fetch branches
 def fetch_branches(repo_url):
@@ -78,6 +94,28 @@ def fetch_branches(repo_url):
         st.error(f"Error fetching branches: {e}")
         return ['main']  # Return 'main' as default branch in case of error
 
+# Function to handle file uploads
+def handle_file_upload(uploaded_files, temp_dir):
+    if not uploaded_files:
+        return []
+    
+    # Create a directory for uploaded files if it doesn't exist
+    upload_dir = os.path.join(temp_dir, "uploaded_files")
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    saved_files = []
+    for uploaded_file in uploaded_files:
+        # Get the file name
+        file_name = uploaded_file.name
+        file_path = os.path.join(upload_dir, file_name)
+        
+        # Save the file
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        saved_files.append(file_path)
+    
+    return saved_files
+
 # Function to list files in directory
 def list_files_and_folders(path):
     files_and_folders = []
@@ -93,30 +131,29 @@ def list_files_and_folders(path):
     return files_and_folders
 
 # Function to clone repo
-def clone_repo(repo_url, local_path, branch):
+def clone_repo(repo_url, temp_dir, branch):
     try:
-        if os.path.exists(local_path):
-            # Check if it's already a git repo
+        # Create a temporary directory for the repository
+        repo_dir = os.path.join(temp_dir, "repo")
+        os.makedirs(repo_dir, exist_ok=True)
+        
+        # Initialize or clone the repository
+        try:
+            repo = git.Repo(repo_dir)
+            # Add remote if not exists
             try:
-                repo = git.Repo(local_path)
-                # Add remote if not exists
-                try:
-                    repo.create_remote('origin', repo_url)
-                except git.exc.GitCommandError:
-                    # Remote already exists, update URL
-                    repo.git.remote('set-url', 'origin', repo_url)
-                
-                # Fetch from remote
-                repo.git.fetch('--all')
-            except git.exc.InvalidGitRepositoryError:
-                # Initialize git repo
-                repo = git.Repo.init(local_path)
                 repo.create_remote('origin', repo_url)
-                repo.git.fetch('--all')
-        else:
-            # Create directory and clone
-            os.makedirs(local_path, exist_ok=True)
-            repo = git.Repo.clone_from(repo_url, local_path)
+            except git.exc.GitCommandError:
+                # Remote already exists, update URL
+                repo.git.remote('set-url', 'origin', repo_url)
+            
+            # Fetch from remote
+            repo.git.fetch('--all')
+        except git.exc.InvalidGitRepositoryError:
+            # Initialize git repo
+            repo = git.Repo.init(repo_dir)
+            repo.create_remote('origin', repo_url)
+            repo.git.fetch('--all')
         
         # Configure git to not sign commits and set user identity
         repo.git.config('--local', 'commit.gpgsign', 'false')
@@ -281,7 +318,7 @@ with st.sidebar:
         st.session_state.git_email = git_email
         if st.session_state.repo_cloned:
             try:
-                repo = git.Repo(st.session_state.local_path)
+                repo = git.Repo(os.path.join(st.session_state.temp_dir, "repo"))
                 if git_username:
                     repo.git.config('--local', 'user.name', git_username)
                 if git_email:
@@ -328,37 +365,49 @@ with st.sidebar:
                 st.session_state.selected_branch = selected_branch
                 st.session_state.new_branch = ""
     
-    # Step 3: Local folder path
+    # Step 3: Set up repository
     if st.session_state.repo_url and (st.session_state.selected_branch or st.session_state.new_branch):
-        st.header("Step 3: Local Path")
-        local_path = st.text_input("Enter local folder path:", st.session_state.local_path)
+        st.header("Step 3: Set up Repository")
         
-        if local_path != st.session_state.local_path:
-            st.session_state.local_path = local_path
-            st.session_state.repo_cloned = False
+        if not st.session_state.temp_dir:
+            st.session_state.temp_dir = tempfile.mkdtemp()
         
         if st.button("Set up repository"):
-            if local_path:
-                with st.spinner("Setting up repository..."):
-                    branch = st.session_state.new_branch if st.session_state.new_branch else st.session_state.selected_branch
-                    success = clone_repo(repo_url, local_path, branch)
-                    if success:
-                        st.session_state.repo_cloned = True
-                        st.session_state.files = list_files_and_folders(local_path)
-                        st.rerun()
-            else:
-                st.error("Please enter a local folder path")
+            with st.spinner("Setting up repository..."):
+                branch = st.session_state.new_branch if st.session_state.new_branch else st.session_state.selected_branch
+                success = clone_repo(repo_url, st.session_state.temp_dir, branch)
+                if success:
+                    st.session_state.repo_cloned = True
+                    st.session_state.files = list_files_and_folders(os.path.join(st.session_state.temp_dir, "repo"))
+                    st.rerun()
 
 # Main area UI
 if st.session_state.repo_cloned:
     st.title("Git Operations")
     
-    # Step 4: Select files to add
-    st.header("Select Files to Add")
+    # Step 4: Upload Files
+    st.header("Upload Files")
+    uploaded_files = st.file_uploader("Choose files to upload", accept_multiple_files=True)
+    
+    if uploaded_files:
+        if st.button("Add Files to Repository"):
+            with st.spinner("Adding files to repository..."):
+                saved_files = handle_file_upload(uploaded_files, st.session_state.temp_dir)
+                if saved_files:
+                    # Copy files to repository directory
+                    repo_dir = os.path.join(st.session_state.temp_dir, "repo")
+                    for file_path in saved_files:
+                        shutil.copy2(file_path, repo_dir)
+                    st.session_state.files = list_files_and_folders(repo_dir)
+                    st.success("Files added successfully!")
+                    st.rerun()
+    
+    # Step 5: Select files to commit
+    st.header("Select Files to Commit")
     
     # Refresh file list
     if st.button("Refresh Files"):
-        st.session_state.files = list_files_and_folders(st.session_state.local_path)
+        st.session_state.files = list_files_and_folders(os.path.join(st.session_state.temp_dir, "repo"))
     
     # Show files with checkboxes
     selected_files = []
@@ -368,7 +417,7 @@ if st.session_state.repo_cloned:
     
     st.session_state.selected_files = selected_files
     
-    # Step 5: Commit and Push Changes
+    # Step 6: Commit and Push Changes
     st.header("Commit and Push Changes")
     st.session_state.commit_message = st.text_area("Enter commit message:", st.session_state.commit_message)
     
@@ -377,7 +426,7 @@ if st.session_state.repo_cloned:
             with st.spinner("Committing and pushing changes..."):
                 branch = st.session_state.new_branch if st.session_state.new_branch else st.session_state.selected_branch
                 success = git_add_commit_push(
-                    st.session_state.local_path,
+                    os.path.join(st.session_state.temp_dir, "repo"),
                     selected_files,
                     st.session_state.commit_message,
                     branch
@@ -386,6 +435,7 @@ if st.session_state.repo_cloned:
                     # Clear selections after successful commit
                     st.session_state.selected_files = []
                     st.session_state.commit_message = ""
+                    st.session_state.files = list_files_and_folders(os.path.join(st.session_state.temp_dir, "repo"))
         else:
             st.error("Please select files and enter a commit message")
 else:
@@ -394,6 +444,6 @@ else:
     st.write("Steps:")
     st.write("1. Enter a public Git repository URL")
     st.write("2. Select or create a branch")
-    st.write("3. Enter a local folder path")
-    st.write("4. Set up the repository")
-    st.write("5. Select files to add, commit, and push")
+    st.write("3. Set up the repository")
+    st.write("4. Upload files")
+    st.write("5. Select files to commit and push")
